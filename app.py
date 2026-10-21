@@ -288,18 +288,30 @@ def main():
 
     sb = st.sidebar
     sb.header("Run settings")
+    mode = sb.radio("Simulation input", ["HMM dataset playback", "Manual occupancy test"])
+    manual_people = None
+    manual_state = None
+
     chg = np.flatnonzero(np.diff(df_all["belief_argmax"].to_numpy()) != 0) + 1
-    opts = ["Full dataset", "First 500"]
-    if len(chg):
-        opts.insert(0, "Demo window around first state change")
-    choice = sb.selectbox("Records to simulate", opts, index=0)
-    if choice.startswith("Demo"):
-        lo, hi = max(0, int(chg[0]) - 100), min(len(df_all), int(chg[0]) + 150)
-    elif choice == "First 500":
-        lo, hi = 0, min(500, len(df_all))
+    if mode == "Manual occupancy test":
+        manual_people = sb.slider("Number of people in the room", min_value=0, max_value=3, value=3)
+        # Map the user-entered occupancy to the project's three MDP states:
+        # 0 people -> S0, 1 person -> S1, 2 or 3 people -> S2.
+        manual_state = 0 if manual_people == 0 else (1 if manual_people == 1 else 2)
+        lo, hi = 0, 1
+        sb.info(f"Manual input: {manual_people} people → S{manual_state}. This tests the MDP using a known state and bypasses HMM inference.")
     else:
-        lo, hi = 0, len(df_all)
-    speed = sb.select_slider("Playback speed (records per tick)", [1, 2, 3, 5, 10, 20, 50], value=3)
+        opts = ["Full dataset", "First 500"]
+        if len(chg):
+            opts.insert(0, "Demo window around first state change")
+        choice = sb.selectbox("Records to simulate", opts, index=0)
+        if choice.startswith("Demo"):
+            lo, hi = max(0, int(chg[0]) - 100), min(len(df_all), int(chg[0]) + 150)
+        elif choice == "First 500":
+            lo, hi = 0, min(500, len(df_all))
+        else:
+            lo, hi = 0, len(df_all)
+    speed = sb.select_slider("Playback speed (records per tick)", [1, 2, 3, 5, 10, 20, 50], value=3, disabled=(mode == "Manual occupancy test"))
     sb.header("Energy assumptions (illustrative)")
     sb.caption("Not measured data. Edit to match your own assumptions.")
     light_w = sb.number_input("Lighting power when ON (W)", 0.0, 5000.0, 60.0, 5.0)
@@ -311,9 +323,22 @@ def main():
     baseline = sb.selectbox("Baseline controller", ["Always ON (A2)", "Most-probable-state policy",
                                                     "Always A1 (lights ON, AC LOW)"])
 
-    df = df_all.iloc[lo:hi].reset_index(drop=True)
-    if ss.get("window") != (lo, hi):
-        ss.window, ss.idx, ss.playing = (lo, hi), 0, False
+    if mode == "Manual occupancy test":
+        # A one-hot belief represents the manually supplied state. This lets the
+        # MDP controller be tested independently from the HMM's state estimation.
+        belief = [1.0 if i == manual_state else 0.0 for i in range(3)]
+        df = pd.DataFrame({
+            "timestamp": [pd.Timestamp.now()],
+            "P0": [belief[0]], "P1": [belief[1]], "P2": [belief[2]],
+            "true": [manual_state],
+            "csv_pred": [manual_state],
+        })
+    else:
+        df = df_all.iloc[lo:hi].reset_index(drop=True)
+
+    window_key = (mode, lo, hi, manual_people if mode == "Manual occupancy test" else None)
+    if ss.get("window") != window_key:
+        ss.window, ss.idx, ss.playing = window_key, 0, False
     params = dict(light_w=light_w, ac_low_w=ac_low, ac_high_w=ac_high, use_gaps=use_gaps,
                   step_s=step_s, baseline=baseline)
     res, Q, a_ai, mps = simulate(df, model, params)
@@ -335,6 +360,8 @@ def main():
     # ---- header + controls (full-page rerun only when these are used)
     h1, h2 = st.columns([5, 1])
     h1.markdown("### 🏢 Smart Room Simulator &nbsp;·&nbsp; HMM belief → MDP decision → lights & AC")
+    if mode == "Manual occupancy test":
+        h1.caption("MANUAL TEST MODE · Known occupancy is mapped directly to an MDP state; HMM inference is bypassed.")
     cls, label = ("run", "● LIVE") if ss.playing else ("ok", "Ready") if ss.idx == 0 else ("warn", "Paused")
     h2.markdown(f'<span class="pill {cls}">{label}</span>', unsafe_allow_html=True)
 
@@ -466,3 +493,4 @@ def main():
 
 
 main()
+
